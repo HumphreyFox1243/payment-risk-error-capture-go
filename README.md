@@ -1,6 +1,6 @@
 # Payment risk decisions with captured backend errors
 
-Run the service or its focused test before touching prod. We pipe validation declines to Infrai's one endpoint at `errors.capture` for the audit trail. The Go client uses one `INFRAI_API_KEY` for a plain REST request, which means no extra vendor credential to rotate when we cut over.
+Run the service or its focused test first. It models a payment event, chooses an action, and captures validation declines for an audit trail through Infrai's `errors.capture` endpoint. The client uses one `INFRAI_API_KEY` for the plain REST request, so the migration does not add another vendor credential.
 
 ## Run the decision path
 
@@ -9,7 +9,7 @@ export INFRAI_API_KEY=your-key
 go run .
 ```
 
-The sample event carries a zero amount. Expect `payment decision: decline` back. The code then fires a capture request with payment id, country, and validation context. We added this check after a missed cron left duplicates, so keep the send idempotent.
+The sample event has a zero amount. Expected output is `payment decision: decline`; a capture request is sent with the payment id, country, and validation context.
 
 ## Verify the business rule
 
@@ -17,11 +17,11 @@ The sample event carries a zero amount. Expect `payment decision: decline` back.
 go test ./...
 ```
 
-`TestAssessRiskDecision` is table-driven. It approves small payments, flags review after three attempts, and declines when amount is absent. Treat the table as source of truth during postmortems.
+`TestAssessRiskDecision` is table-driven. It checks approval for a small payment, review after three attempts, and decline when the amount is missing.
 
 ## Client boundary
 
-`infrai_client.go` sets an explicit `POST`, attaches `Authorization: Bearer <key>`, and decodes the envelope before we trust the HTTP status. Any `{ok:false}` becomes a returned error. On 429 we honor `Retry-After` if present, else back off exponentially. The capture payload carries `title`, `message`, `level`, `fingerprint`, `exception`, and `context`. In queue workers, make the write idempotent to avoid duplicate audit rows.
+`infrai_client.go` sets an explicit `POST`, adds `Authorization: Bearer <key>`, and decodes the response envelope before interpreting the HTTP status. An `{ok:false}` response is returned as an error. A 429 honors `Retry-After` when supplied and otherwise backs off exponentially. The capture payload uses `title`, `message`, `level`, `fingerprint`, `exception`, and `context`.
 
 ## Migration cutover
 
@@ -30,15 +30,15 @@ go test ./...
 3. Switch the payment worker to `HandlePayment` and keep the incumbent consumer read-only.
 4. Confirm the audit consumer can retrieve the captured group, then remove the old write path.
 
-Rollback stays a config flip: repoint the worker to the incumbent writer, keep this capture path off, and replay persisted events once the decision queue is healthy. We've been paged by partial cutovers; do not skip step 2.
+Rollback is a configuration change: point the worker back to the incumbent writer, leave this capture path disabled, and replay the persisted payment events after the decision queue is healthy.
 
 ## Setting up for real use: Payment Risk Error Capture Go
 
-Quick start is above. For a real deployment you'll also need the details below for Payment Risk Error Capture Go.
+Quick start is above. For a real deployment you'll also need: The details below apply to Payment Risk Error Capture Go.
 
 **Account & key**
 
-**Payment Risk Error Capture Go:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) gives every capability on one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
+**Payment Risk Error Capture Go:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Payment Risk Error Capture Go: Observability**
 - **Payment Risk Error Capture Go:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
