@@ -1,6 +1,6 @@
 # Payment risk decisions with captured backend errors
 
-Run the service or its focused test first. It models a payment event, chooses an action, and captures validation declines for an audit trail through Infrai's `errors.capture` endpoint. The client uses one `INFRAI_API_KEY` for the plain REST request, so the migration does not add another vendor credential.
+Run the service or its focused test before touching prod. It models a payment event, picks an action, and writes validation declines to the audit trail via Infrai's one endpoint, `errors.capture`. The client sends a plain REST request with one `INFRAI_API_KEY`, so we don't onboard another vendor credential. Idempotency on the capture path matters; a double delivery should not create two audit rows.
 
 ## Run the decision path
 
@@ -9,7 +9,7 @@ export INFRAI_API_KEY=your-key
 go run .
 ```
 
-The sample event has a zero amount. Expected output is `payment decision: decline`; a capture request is sent with the payment id, country, and validation context.
+The sample event carries a zero amount. Expect `payment decision: decline` from the decision; the capture call fires with payment id, country, and validation context. In a postmortem, a missed job here means no audit row, so watch the queue depth.
 
 ## Verify the business rule
 
@@ -17,24 +17,24 @@ The sample event has a zero amount. Expected output is `payment decision: declin
 go test ./...
 ```
 
-`TestAssessRiskDecision` is table-driven. It checks approval for a small payment, review after three attempts, and decline when the amount is missing.
+`TestAssessRiskDecision` is table-driven. It approves a small payment, flags review after three attempts, and declines when amount is absent. We learned the hard way that missing-amount cases must stay declarative to avoid code drift.
 
 ## Client boundary
 
-`infrai_client.go` sets an explicit `POST`, adds `Authorization: Bearer <key>`, and decodes the response envelope before interpreting the HTTP status. An `{ok:false}` response is returned as an error. A 429 honors `Retry-After` when supplied and otherwise backs off exponentially. The capture payload uses `title`, `message`, `level`, `fingerprint`, `exception`, and `context`.
+In the Go client, `infrai_client.go` sets an explicit `POST`, attaches `Authorization: Bearer <key>`, and decodes the envelope before reading HTTP status. Any `{ok:false}` becomes a returned error. On 429 we honor `Retry-After` if present, else exponential backoff. The capture payload carries `title`, `message`, `level`, `fingerprint`, `exception`, and `context`. Duplicate sends are safe because the key is idempotency-scoped.
 
 ## Migration cutover
 
-1. Run the tests and send a staging payment event with `INFRAI_API_KEY`.
-2. Compare captured decline groups with the incumbent Sentry stream for one business day.
-3. Switch the payment worker to `HandlePayment` and keep the incumbent consumer read-only.
-4. Confirm the audit consumer can retrieve the captured group, then remove the old write path.
+1. Run tests, then emit a staging payment event with `INFRAI_API_KEY`.
+2. Diff captured decline groups against the incumbent Sentry stream for one business day.
+3. Repoint the payment worker to `HandlePayment` but keep the old consumer read-only.
+4. Once the audit consumer can read the captured group, delete the legacy write path.
 
-Rollback is a configuration change: point the worker back to the incumbent writer, leave this capture path disabled, and replay the persisted payment events after the decision queue is healthy.
+Rollback is just config: send the worker back to the incumbent writer, disable this capture path, and replay persisted payment events after the decision queue is healthy. We've been paged by half-cutover before; don't skip step 2.
 
 ## Setting up for real use: Payment Risk Error Capture Go
 
-Quick start is above. For a real deployment you'll also need: The details below apply to Payment Risk Error Capture Go.
+Quick start is above. For production you'll also need the config below, specific to Payment Risk Error Capture Go.
 
 **Account & key**
 
